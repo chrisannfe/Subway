@@ -10,48 +10,62 @@ html,body{margin:0;height:100%;overflow:hidden;background:#10131c;font-family:sy
 #hud{position:fixed;top:12px;left:16px;z-index:5;font:700 22px system-ui;text-shadow:0 2px 4px #000}
 #vrbtn{position:fixed!important;left:50%!important;bottom:24px!important;transform:translateX(-50%)!important;width:auto!important;padding:14px 26px!important;background:#ff3d81!important;color:#fff!important;border:0!important;border-radius:999px!important;font:700 18px system-ui!important;z-index:100!important;opacity:1!important}
 #vrbtn::before{content:"\1F97D\00a0"}
-</style>
+#lbbox{margin-top:14px;font-size:16px}#lb{margin:4px 0;padding-left:24px;text-align:left;display:inline-block}</style>
 <script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"}}</script>
 </head><body>
 <div id="hud"></div>
 <div id="ui"><h1>Subway Dash VR</h1><div id="msg">Dodge trains, jump barriers, slide under bars.</div><button id="btn">Start Game</button>
-<div id="guide"><b>Keyboard:</b> ←/A ,→/D lanes · Space jump · ↓/S slide · P or Esc pause · R restart · G toggle gestures<br>
-<b>VR controllers:</b> stick left/right = lane, stick up or A = jump, stick down or B = slide, trigger = start/resume, Y = pause, X = gestures on/off<br>
-<b>VR gestures:</b> lean = lane · raise a hand = jump · crouch = slide (turn off for seated play)</div><div id="cap"></div></div>
+<div id="lbbox"><b>Top scores</b><br><ol id="lb"></ol></div><div id="guide"><b>Keyboard:</b> ←/A ,→/D lanes · Space jump · ↓/S slide · P or Esc pause · R restart · G gestures · V camera view · M mute<br>
+<b>VR controllers:</b> stick left/right = lane, stick up or A = jump, stick down or B = slide, trigger = start/resume, Y = pause, X = gestures on/off, stick click = camera view<br>
+<b>VR gestures:</b> lean = lane · really jump or raise a hand = jump · crouch or sit = slide (turn off for seated play)</div><div id="cap"></div></div>
 <script type="module">
 import * as THREE from 'three';
 import { VRButton } from 'three/addons/webxr/VRButton.js';
 
 /* ---- Tunables: gesture thresholds in metres, smoothing 0..1, cooldown in ms ---- */
-const CFG = { lean:.12, crouch:.2, jump:.25, smooth:.25, cool:450 };
+const CFG = { lean:.12, crouch:.18, jump:.25, smooth:.25, cool:450, hop:.08 };
 const LANES=[-2,0,2], SEG=40, NS=6, EYE=1.6;
 
 const renderer=new THREE.WebGLRenderer({antialias:true});
 renderer.setPixelRatio(Math.min(devicePixelRatio,2)); renderer.setSize(innerWidth,innerHeight);
 renderer.xr.enabled=true; renderer.xr.setReferenceSpaceType('local-floor');
+renderer.shadowMap.enabled=true; renderer.shadowMap.type=THREE.PCFSoftShadowMap;
 document.body.appendChild(renderer.domElement);
 const scene=new THREE.Scene(); scene.background=new THREE.Color(0x10131c); scene.fog=new THREE.Fog(0x10131c,20,95);
 const rig=new THREE.Group(), cam=new THREE.PerspectiveCamera(70,innerWidth/innerHeight,.1,200);
 rig.add(cam); scene.add(rig);   // we move the RIG; the headset owns the camera
-scene.add(new THREE.HemisphereLight(0xb8c4ff,0x2a2a3a,1.1));
-const sun=new THREE.DirectionalLight(0xffffff,.5); sun.position.set(2,8,4); scene.add(sun);
+scene.add(new THREE.HemisphereLight(0xb8c4ff,0x2a2a3a,.6));
+// Sun-like key light that follows the player and casts shadows (shadows are switched off in VR for speed)
+const sun=new THREE.DirectionalLight(0xfff1dd,1.0); sun.castShadow=true; sun.shadow.mapSize.set(1024,1024);
+Object.assign(sun.shadow.camera,{left:-16,right:16,top:22,bottom:-22,near:1,far:45}); scene.add(sun,sun.target);
+// Two warm lamps that travel with the player so the tunnel always looks lit
+const pl1=new THREE.PointLight(0xffd9a0,30,22,1.6),pl2=new THREE.PointLight(0xffd9a0,30,22,1.6); scene.add(pl1,pl2);
 
-const mat=c=>new THREE.MeshLambertMaterial({color:c});
-const bx=(p,w,h,d,m,x,y,z)=>{const o=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),m);o.position.set(x,y,z);p.add(o);return o;};
+const mat=(c,map,m=.1,r=.8)=>new THREE.MeshStandardMaterial({color:c,map,metalness:m,roughness:r});
+const bx=(p,w,h,d,m,x,y,z)=>{const o=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),m);o.position.set(x,y,z);o.castShadow=o.receiveShadow=true;p.add(o);return o;};
 
 /* ---- Environment: 6 station segments, recycled forward forever ---- */
-const segs=[], mFloor=mat(0x23262e), mRail=mat(0x9aa0aa), mTie=mat(0x4a3526), mPlat=mat(0x4a4f5c),
-  mWall=mat(0x2e3a4a), mPil=mat(0x6a707e), mLamp=new THREE.MeshBasicMaterial({color:0xfff2c0});
+function tex(base,draw,rx,ry){const c=document.createElement('canvas');c.width=c.height=128;const x=c.getContext('2d');x.fillStyle=base;x.fillRect(0,0,128,128);
+  for(let i=0;i<500;i++){x.fillStyle=`rgba(255,255,255,${Math.random()*.07})`;x.fillRect(Math.random()*128,Math.random()*128,2,2);x.fillStyle=`rgba(0,0,0,${Math.random()*.1})`;x.fillRect(Math.random()*128,Math.random()*128,2,2);}
+  if(draw)draw(x);const t=new THREE.CanvasTexture(c);t.wrapS=t.wrapT=THREE.RepeatWrapping;t.repeat.set(rx,ry);t.colorSpace=THREE.SRGBColorSpace;t.anisotropy=4;return t;}
+const seam=x=>{x.fillStyle='rgba(0,0,0,.4)';x.fillRect(0,0,128,2);x.fillRect(0,0,2,128);};
+const tiles=x=>{x.strokeStyle='rgba(255,255,255,.28)';x.lineWidth=3;for(const a of[0,64])for(const b of[0,64])x.strokeRect(a,b,64,64);};
+const planks=x=>{x.fillStyle='rgba(0,0,0,.35)';for(let i=0;i<128;i+=32)x.fillRect(0,i,128,2);x.fillStyle='rgba(0,0,0,.12)';for(let i=0;i<40;i++)x.fillRect(Math.random()*128,Math.random()*128,40,1);};
+const streak=x=>{x.fillStyle='rgba(255,255,255,.1)';for(let i=0;i<30;i++)x.fillRect(0,Math.random()*128,128,1);};
+const segs=[], mFloor=mat(0xffffff,tex('#2f333c',seam,4.5,18),.2,.9), mRail=mat(0x9aa0aa,null,.8,.35), mTie=mat(0xffffff,tex('#5a3d2a',planks,1,1)),
+  mPlat=mat(0xffffff,tex('#5a5f6c',seam,1.5,18),.1,.9), mWall=mat(0xffffff,tex('#3b5167',tiles,18,3.5),.3,.5), mCeil=mat(0xffffff,tex('#4a525e',null,6,18),.2,.9),
+  mPil=mat(0xffffff,tex('#7a808e',null,1,3)), mYel=mat(0xf2c21b), mLamp=new THREE.MeshBasicMaterial({color:0xfff2c0});
 for(let i=0;i<NS;i++){
   const g=new THREE.Group();
   bx(g,9,.2,SEG,mFloor,0,-.1,0);
   for(const x of LANES){bx(g,.08,.12,SEG,mRail,x-.5,.05,0);bx(g,.08,.12,SEG,mRail,x+.5,.05,0);}
   for(let k=0;k<10;k++)bx(g,6.6,.06,.3,mTie,0,.02,-SEG/2+2+k*4);
   for(const s of[-1,1]){
-    bx(g,3,.6,SEG,mPlat,s*5.3,.3,0); bx(g,.4,7,SEG,mWall,s*7.2,3.5,0);
+    bx(g,3,.6,SEG,mPlat,s*5.3,.3,0); bx(g,.4,7,SEG,mWall,s*7.2,3.5,0); bx(g,.15,.02,SEG,mYel,s*3.9,.61,0);   // yellow platform-edge strip
+    {const p=new THREE.Mesh(new THREE.CylinderGeometry(.15,.15,SEG,16).rotateX(Math.PI/2),mRail);p.position.set(s*3,5.6,0);g.add(p);}   // ceiling pipe
     for(let k=0;k<4;k++)bx(g,.5,6,.5,mPil,s*4.2,3,-SEG/2+5+k*10);
   }
-  bx(g,15,.3,SEG,mWall,0,6.2,0);
+  bx(g,15,.3,SEG,mCeil,0,6.2,0);
   for(let k=0;k<4;k++)bx(g,2,.1,.6,mLamp,0,6,-SEG/2+5+k*10);
   g.position.z=40-i*SEG; scene.add(g); segs.push(g);
 }
@@ -59,10 +73,25 @@ for(let i=0;i<NS;i++){
 /* ---- Object pools (nothing is created during play) ---- */
 const defs=[{w:1.8,h:2.6,d:7,y:0,c:0x3a6ea5},{w:1.8,h:.8,d:.5,y:0,c:0xd9453d},
   {w:1.8,h:.6,d:.5,y:1.1,c:0xe0a82e,legs:1},{w:1.2,h:.9,d:1.2,y:0,c:0x9a6b3c}]; // train, low barrier, overhead bar, crate
-const obs=[]; defs.forEach((d,t)=>{for(let i=0;i<10;i++){
-  const m=new THREE.Mesh(new THREE.BoxGeometry(d.w,d.h,d.d),mat(d.c)); m.visible=false; scene.add(m);
-  if(d.legs)for(const s of[-1,1])bx(m,.1,d.y,.1,mat(0x888888),s*(d.w/2-.1),-d.h/2-d.y/2,0);
-  obs.push({m,t,d,on:false,x:0,z:0});}});
+const mTrain=mat(0xffffff,tex('#3a6ea5',streak,1,1),.6,.35), mStripe=mat(0xffd23f), mMetal=mat(0x9aa0aa,null,.9,.3), mRed=mat(0xd9453d), mWhite=mat(0xf2f2f2),
+  mCrate=mat(0xffffff,tex('#9a6b3c',planks,1,1)), mDark=mat(0x3a2a1c), mGold=mat(0xe0b040,null,.9,.3),
+  mGlow=new THREE.MeshStandardMaterial({color:0xfff2c0,emissive:0xffe08a,emissiveIntensity:1.5});
+const cyl=(p,r,l,seg,m,x,y,z,ax)=>{const g=new THREE.CylinderGeometry(r,r,l,seg);if(ax==='z')g.rotateX(Math.PI/2);if(ax==='x')g.rotateZ(Math.PI/2);const o=new THREE.Mesh(g,m);o.position.set(x,y,z);o.castShadow=true;p.add(o);return o;};
+const sph=(p,r,m,x,y,z)=>{const o=new THREE.Mesh(new THREE.SphereGeometry(r,24,16),m);o.position.set(x,y,z);o.castShadow=true;p.add(o);return o;};
+// Detailed (high-poly) builders. Origin = centre of the collision box; shapes are built once, then cloned into the pool.
+const builders=[
+ g=>{ bx(g,1.8,2,7,mTrain,0,-.05,0); cyl(g,.9,7,32,mTrain,0,.95,0,'z').scale.y=.4; bx(g,1.82,.25,7.02,mStripe,0,-.6,0);   // train: body, curved roof, stripe
+   for(const s of[-1,1]){for(let k=0;k<4;k++)bx(g,.02,.6,1.1,mGlow,s*.91,.35,-2.6+k*1.75); for(let k=0;k<3;k++)cyl(g,.35,.2,24,mMetal,s*.75,-1,-2.3+k*2.3,'x');}
+   sph(g,.16,mGlow,-.5,-.4,3.5); sph(g,.16,mGlow,.5,-.4,3.5); },
+ g=>{ for(const s of[-1,1]){cyl(g,.05,.8,16,mMetal,s*.8,0,0); sph(g,.08,mGlow,s*.8,.44,0);}   // low barrier: legs, striped beams, warning lamps
+   bx(g,1.7,.22,.12,mRed,0,.2,0); bx(g,1.7,.22,.12,mWhite,0,-.12,0); for(let k=0;k<6;k++)bx(g,.15,.23,.13,mWhite,-.7+k*.28,.2,0); },
+ g=>{ cyl(g,.22,1.8,32,mStripe,0,0,0,'x'); for(const x of[-.7,0,.7]){const t=new THREE.Mesh(new THREE.TorusGeometry(.25,.04,12,32).rotateY(Math.PI/2),mDark);t.position.x=x;g.add(t);}   // overhead pipe with rings + legs
+   for(const s of[-1,1])cyl(g,.06,1.1,16,mMetal,s*.8,-.85,0); },
+ g=>{ bx(g,1.2,.9,1.2,mCrate,0,0,0);   // crate: planks, frame beams, bolts
+   for(const a of[-.6,.6])for(const b of[-.6,.6]){bx(g,.14,.94,.14,mDark,a,0,b);for(const y of[-.42,.42])sph(g,.04,mGold,a,y,b+(b>0?.08:-.08));}
+   for(const y of[-.42,.42])for(const a of[-.6,.6]){bx(g,1.2,.12,.14,mDark,0,y,a);bx(g,.14,.12,1.2,mDark,a,y,0);} }];
+const obs=[]; defs.forEach((d,t)=>{const base=new THREE.Group();builders[t](base);
+  for(let i=0;i<10;i++){const m=base.clone();m.visible=false;scene.add(m);obs.push({m,t,d,on:false,x:0,z:0});}});
 const cg=new THREE.CylinderGeometry(.25,.25,.06,10).rotateX(Math.PI/2), cm=new THREE.MeshLambertMaterial({color:0xffd23f,emissive:0x8a6a00});
 const coins=[]; for(let i=0;i<60;i++){const m=new THREE.Mesh(cg,cm);m.visible=false;scene.add(m);coins.push({m,on:false,x:0,z:0});}
 function putObs(t,lane,z){const o=obs.find(o=>!o.on&&o.t===t);if(!o)return;o.on=true;o.x=LANES[lane];o.z=z;o.m.position.set(o.x,o.d.y+o.d.h/2,z);o.m.visible=true;}
@@ -73,39 +102,78 @@ function spawnRow(z,dif){            // always leaves one lane free
   for(let k=0;k<5;k++)putCoin(ln[n],z-k*1.5);
 }
 
+/* ---- Runner avatar (third-person view). V key / right-stick click toggles. ---- */
+let tp=true;
+const av=new THREE.Group(); scene.add(av);
+const mSkin=mat(0xf0c8a0),mShirt=mat(0xff3d81),mPants=mat(0x2b3a67);
+const capsule=(r,l,m,x,y,z)=>{const o=new THREE.Mesh(new THREE.CapsuleGeometry(r,l,6,12),m);o.position.set(x,y,z);o.castShadow=true;return o;};
+const body=new THREE.Group();av.add(body);
+body.add(capsule(.22,.5,mShirt,0,1.05,0),capsule(.2,.0,mSkin,0,1.55,0),capsule(.15,.3,mDark,0,1.1,.26));
+const hatM=new THREE.Mesh(new THREE.CylinderGeometry(.2,.22,.12,16),mStripe);hatM.position.y=1.7;body.add(hatM);
+const limb=(x,y,m)=>{const p=new THREE.Group();p.position.set(x,y,0);p.add(capsule(.08,.4,m,0,-.35,0));body.add(p);return p;};
+const legL=limb(-.12,.8,mPants),legR=limb(.12,.8,mPants),armL=limb(-.3,1.3,mShirt),armR=limb(.3,1.3,mShirt);
+
 /* ---- Game state ---- */
 let state='menu',lane=1,px=0,pz=0,jy=0,vy=0,slideT=0,coinsN=0,dist=0,tGame=0,nextZ=-35,gestures=true,calibT=0,cool=0;
 const score=()=>(dist|0)+coinsN*10;
 const ui=document.getElementById('ui'),btn=document.getElementById('btn'),msg=document.getElementById('msg'),hud=document.getElementById('hud'),cap=document.getElementById('cap');
 const inVR=()=>renderer.xr.isPresenting;
 function showUI(on,btnText,text){ui.style.display=on?'flex':'none';if(btnText)btn.textContent=btnText;if(text)msg.textContent=text;}
-function startGame(){
+function startGame(){initAudio();
   [...obs,...coins].forEach(o=>{o.on=false;o.m.visible=false;});
   lane=1;px=0;pz=0;jy=vy=slideT=0;coinsN=0;dist=0;tGame=0;nextZ=-35;
   segs.forEach((g,i)=>g.position.z=40-i*SEG);
   if(inVR()&&gestures&&hasCtl){state='calib';calibT=1.5;bn=0;base.x=base.y=base.h=0;}else state='play';
   showUI(false);
 }
-function gameOver(){state='over';showUI(true,'Restart',`Game over. Score ${score()} (${dist|0} m, ${coinsN} coins)`);}
+let lb=[];try{lb=JSON.parse(localStorage.getItem('sdvr_lb')||'[]');}catch(e){}   // leaderboard survives restarts (and page reloads where storage is allowed)
+function renderLB(){document.getElementById('lb').innerHTML=lb.length?lb.map(r=>`<li>${r.s} <small>${r.d}</small></li>`).join(''):'<li>No scores yet</li>';}
+renderLB();
+function gameOver(){sfx.crash();const sc=score(),best=!lb.length||sc>lb[0].s;
+  lb.push({s:sc,d:new Date().toLocaleDateString()});lb.sort((a,b)=>b.s-a.s);lb=lb.slice(0,5);try{localStorage.setItem('sdvr_lb',JSON.stringify(lb));}catch(e){}
+  renderLB();state='over';showUI(true,'Restart',`Game over. Score ${sc} (${dist|0} m, ${coinsN} coins)${best?' - new best!':''}`);}
 function pause(){if(state==='play'){state='pause';showUI(true,'Resume','Paused');}else if(state==='pause'){state='play';showUI(false);}}
 btn.onclick=()=>state==='pause'?pause():startGame();
 
+/* ---- Audio: everything is synthesized with Web Audio ---- */
+let ac,mg,nb,muted=false,step=0,stepT=0;
+function initAudio(){
+  if(!ac){ac=new (window.AudioContext||window.webkitAudioContext)();mg=ac.createGain();mg.gain.value=.6;mg.connect(ac.destination);
+    nb=ac.createBuffer(1,ac.sampleRate,ac.sampleRate);const d=nb.getChannelData(0);for(let i=0;i<d.length;i++)d[i]=Math.random()*2-1;
+    setInterval(()=>{if(!ac||muted||ac.state!=='running')return;const q=step++,r=[1,1,1.19,1.33][(q>>3)%4];   // background loop: bass + arpeggio
+      if(q%2===0)tone(55*r,54*r,.3,'triangle',.25); tone([220,262,330,262][q%4]*r,[220,262,330,262][q%4]*r,.14,'square',.035);},180);}
+  if(ac.state==='suspended')ac.resume();
+}
+function tone(f0,f1,dur,type='sine',vol=.3){if(!ac||muted)return;const t=ac.currentTime,o=ac.createOscillator(),g=ac.createGain();o.type=type;o.frequency.setValueAtTime(f0,t);o.frequency.exponentialRampToValueAtTime(f1,t+dur);
+  g.gain.setValueAtTime(vol,t);g.gain.exponentialRampToValueAtTime(.001,t+dur);o.connect(g);g.connect(mg);o.start(t);o.stop(t+dur);}
+function hiss(f0,f1,dur,vol=.25){if(!ac||muted)return;const t=ac.currentTime,n=ac.createBufferSource(),f=ac.createBiquadFilter(),g=ac.createGain();n.buffer=nb;f.type='bandpass';
+  f.frequency.setValueAtTime(f0,t);f.frequency.exponentialRampToValueAtTime(f1,t+dur);g.gain.setValueAtTime(vol,t);g.gain.exponentialRampToValueAtTime(.001,t+dur);n.connect(f);f.connect(g);g.connect(mg);n.start(t);n.stop(t+dur);}
+const sfx={lane:()=>hiss(600,1800,.15),jump:()=>tone(300,720,.25,'square',.12),slide:()=>hiss(1500,300,.3,.3),land:()=>tone(150,60,.12,'sine',.3),step:()=>tone(130,60,.08,'sine',.18),
+  coin:()=>{tone(988,988,.1,'square',.1);setTimeout(()=>tone(1319,1319,.2,'square',.1),70);},crash:()=>{hiss(800,60,.6,.7);tone(120,40,.6,'sawtooth',.4);}};
+
 /* ---- Actions (jump/slide change gameplay state, never the VR camera height) ---- */
-const moveLane=d=>{if(state==='play')lane=Math.max(0,Math.min(2,lane+d));};
-const jump=()=>{if(state==='play'&&jy===0){vy=7.5;slideT=0;}};
-const slide=()=>{if(state==='play'){slideT=.8;if(jy>0)vy=-12;}};
+const setLane=n=>{if(state==='play'&&n!==lane){lane=n;sfx.lane();}};
+const moveLane=d=>setLane(Math.max(0,Math.min(2,lane+d)));
+const jump=()=>{if(state==='play'&&jy===0){vy=7.5;slideT=0;sfx.jump();}};
+const slide=()=>{if(state==='play'){if(slideT<=0)sfx.slide();slideT=.8;if(jy>0)vy=-12;}};
 addEventListener('keydown',e=>{
-  const k=e.code;
+  const k=e.code;initAudio();
   if(k==='ArrowLeft'||k==='KeyA')moveLane(-1); else if(k==='ArrowRight'||k==='KeyD')moveLane(1);
   else if(k==='Space'){e.preventDefault();if(state==='menu'||state==='over')startGame();else jump();}
   else if(k==='ArrowDown'||k==='KeyS')slide(); else if(k==='KeyR')startGame();
-  else if(k==='KeyP')pause(); else if(k==='KeyG')gestures=!gestures;
+  else if(k==='KeyP')pause(); else if(k==='KeyG')gestures=!gestures; else if(k==='KeyV')tp=!tp; else if(k==='KeyM')muted=!muted;
   else if(k==='Escape'){if(inVR())renderer.xr.getSession().end();else pause();}
 });
 
 /* ---- VR: controllers + body gestures ---- */
 const c0=renderer.xr.getController(0),c1=renderer.xr.getController(1);
-for(const c of[c0,c1]){rig.add(c);c.addEventListener('selectstart',()=>{if(state==='menu'||state==='over')startGame();else if(state==='pause')pause();});}
+const hints={left:['STICK: < > = lane','up = jump, down = slide','X: gestures  Y: pause'],right:['STICK: < > = lane','A: jump    B: slide','stick click: camera']},labels=[];
+function label(lines){const c=document.createElement('canvas');c.width=256;c.height=110;const x=c.getContext('2d');x.fillStyle='rgba(0,0,0,.75)';x.fillRect(0,0,256,110);x.fillStyle='#ffd23f';x.font='bold 19px sans-serif';
+  lines.forEach((t,i)=>x.fillText(t,8,28+i*30));const m=new THREE.Mesh(new THREE.PlaneGeometry(.17,.073),new THREE.MeshBasicMaterial({map:new THREE.CanvasTexture(c),transparent:true,depthTest:false}));
+  m.position.set(0,.1,.03);m.rotation.x=-.9;m.renderOrder=8;return m;}   // small panel floating above each controller's stick
+for(const c of[c0,c1]){rig.add(c);
+  c.addEventListener('connected',e=>{const h=e.data.handedness;if(hints[h]&&!c.userData.l){c.userData.l=label(hints[h]);c.add(c.userData.l);labels.push(c.userData.l);}});
+  c.addEventListener('selectstart',()=>{initAudio();if(state==='menu'||state==='over')startGame();else if(state==='pause')pause();});}
 let hasCtl=false;const prev={},base={x:0,y:0,h:0},sm={x:0,y:0,h:0};let bn=0,zone=0;
 function pollVR(){
   const s=renderer.xr.getSession();if(!s)return;let n=0;
@@ -118,7 +186,7 @@ function pollVR(){
     const b4=!!gp.buttons[4]?.pressed,b5=!!gp.buttons[5]?.pressed;
     if(src.handedness==='right'){
       if(edge('a',b4)){if(state==='menu'||state==='over')startGame();else jump();}
-      if(edge('b',b5))slide();
+      if(edge('b',b5))slide(); if(edge('tp',!!gp.buttons[3]?.pressed))tp=!tp;
     }else{ if(edge('x',b4))gestures=!gestures; if(edge('y',b5))pause(); }
   }
   hasCtl=n>0;
@@ -129,11 +197,11 @@ function gestureStep(now){
   if(state==='calib'){bn++;base.x+=(sm.x-base.x)/bn;base.y+=(sm.y-base.y)/bn;base.h+=(sm.h-base.h)/bn;return;}
   if(state!=='play'||!gestures||!hasCtl)return;
   const lean=sm.x-base.x;                                           // lean = head offset sideways from calibrated centre
-  if(Math.abs(lean)>CFG.lean){const z=Math.sign(lean);if(z!==zone){zone=z;lane=1+z;}}
-  else if(Math.abs(lean)<CFG.lean*.6&&zone){zone=0;lane=1;}
+  if(Math.abs(lean)>CFG.lean){const z=Math.sign(lean);if(z!==zone){zone=z;setLane(1+z);}}
+  else if(Math.abs(lean)<CFG.lean*.6&&zone){zone=0;setLane(1);}
   if(now>cool){
-    if(sm.h-base.h>CFG.jump){jump();cool=now+CFG.cool;}             // hand raised above its calibrated height
-    else if(base.y-sm.y>CFG.crouch){slide();cool=now+CFG.cool;}     // head lowered = crouch
+    if(sm.h-base.h>CFG.jump||sm.y-base.y>CFG.hop){jump();cool=now+CFG.cool;}   // hand raised OR head rises (a real hop)             
+    else if(base.y-sm.y>CFG.crouch){slide();cool=now+CFG.cool;}     // head lowered = crouch or sit
   }
 }
 
@@ -144,9 +212,9 @@ hp.position.set(0,-.4,-1.5);hp.renderOrder=9;hp.visible=false;cam.add(hp);
 let hudT=0;
 function drawVRHud(){
   const L={play:[`Score ${score()}`,`${dist|0} m   Coins ${coinsN}`],calib:['Hold still...','calibrating'],
-    menu:['Subway Dash VR','Trigger or A to start'],over:['Game over',`Score ${score()}`,'Trigger or A to restart'],pause:['Paused','Trigger to resume']}[state];
-  hx.clearRect(0,0,512,256);hx.fillStyle='rgba(0,0,0,.65)';hx.fillRect(0,0,512,256);hx.fillStyle='#fff';hx.textAlign='center';hx.font='bold 38px sans-serif';
-  L.forEach((t,i)=>hx.fillText(t,256,70+i*52));hx.font='24px sans-serif';hx.fillText('Gestures: '+(gestures&&hasCtl?'ON':'OFF')+' (X toggles)',256,238);ht.needsUpdate=true;
+    menu:['Subway Dash VR','Trigger or A to start'],over:['Game over',`Score ${score()}`,'Top: '+lb.slice(0,3).map(r=>r.s).join(' / '),'Trigger or A to restart'],pause:['Paused','Trigger to resume']}[state];
+  hx.clearRect(0,0,512,256);hx.fillStyle='rgba(0,0,0,.65)';hx.fillRect(0,0,512,256);hx.fillStyle='#fff';hx.textAlign='center';hx.font='bold 36px sans-serif';
+  L.forEach((t,i)=>hx.fillText(t,256,52+i*46));hx.font='24px sans-serif';hx.fillText('Gestures: '+(gestures&&hasCtl?'ON':'OFF')+' (X toggles)',256,238);ht.needsUpdate=true;
 }
 
 /* ---- Capability detection + VR entry ---- */
@@ -155,16 +223,17 @@ if(navigator.xr){navigator.xr.isSessionSupported('immersive-vr').then(ok=>{
   if(ok){const b=VRButton.createButton(renderer);b.id='vrbtn';document.body.appendChild(b);cap.textContent='WebXR VR supported. '+cap.textContent;}
   else cap.textContent='VR not supported here, desktop keyboard mode works. '+cap.textContent;
 }).catch(()=>{});}else cap.textContent='WebXR unavailable (needs HTTPS and a VR browser), keyboard mode works. '+cap.textContent;
-renderer.xr.addEventListener('sessionstart',()=>{hp.visible=true;});
-renderer.xr.addEventListener('sessionend',()=>{hp.visible=false;cam.fov=70;cam.aspect=innerWidth/innerHeight;cam.updateProjectionMatrix();});
+renderer.xr.addEventListener('sessionstart',()=>{hp.visible=true;tp=false;sun.castShadow=false;initAudio();});
+renderer.xr.addEventListener('sessionend',()=>{hp.visible=false;tp=true;sun.castShadow=true;cam.fov=70;cam.aspect=innerWidth/innerHeight;cam.updateProjectionMatrix();});
 
 /* ---- Per-frame game update ---- */
 function update(dt){
   const dif=Math.min(1,tGame/120),speed=10+18*dif; tGame+=dt;       // difficulty ramps over ~2 minutes
   pz-=speed*dt; dist=-pz;
   px+=(LANES[lane]-px)*Math.min(1,dt*12);
-  if(jy>0||vy>0){vy-=20*dt;jy+=vy*dt;if(jy<=0){jy=0;vy=0;}}
+  if(jy>0||vy>0){vy-=20*dt;jy+=vy*dt;if(jy<=0){jy=0;vy=0;sfx.land();}}
   if(slideT>0)slideT-=dt;
+  if((stepT-=dt)<=0&&jy===0&&slideT<=0){sfx.step();stepT=.42-.2*dif;}
   while(nextZ>pz-90){spawnRow(nextZ,dif);nextZ-=Math.max(12,24-12*dif);}
   const top=jy+(slideT>0?.8:1.7);
   for(const o of obs){ if(!o.on)continue;
@@ -173,7 +242,7 @@ function update(dt){
   }
   for(const c of coins){ if(!c.on)continue;
     if(c.z>pz+8){c.on=false;c.m.visible=false;continue;}
-    if(Math.abs(c.x-px)<.7&&Math.abs(c.z-pz)<.6&&jy<1.2&&top>.6){c.on=false;c.m.visible=false;coinsN++;}
+    if(Math.abs(c.x-px)<.7&&Math.abs(c.z-pz)<.6&&jy<1.2&&top>.6){c.on=false;c.m.visible=false;coinsN++;sfx.coin();}
     c.m.rotation.y+=dt*4;
   }
   for(const g of segs)if(g.position.z-SEG/2>pz+SEG/2)g.position.z-=NS*SEG; // infinite track
@@ -185,7 +254,13 @@ renderer.setAnimationLoop(()=>{
   if(state==='calib'){calibT-=dt;if(calibT<=0)state='play';}
   if(state==='play')update(dt);
   // Desktop gets a little jump/slide camera motion; in VR the headset height is never touched.
-  rig.position.set(px,inVR()?0:EYE+jy*.4-(slideT>0?.5:0),pz);
+  sun.position.set(px+5,12,pz+6);sun.target.position.set(px,0,pz-8);pl1.position.set(px,5,pz-6);pl2.position.set(px,5,pz-30);
+  // Third person: camera sits behind the runner (desktop: up and back; VR: 3 m back, headset height untouched).
+  rig.position.set(px,inVR()?0:EYE+(tp?.8:jy*.4-(slideT>0?.5:0)),pz+(tp?(inVR()?3:4.5):0));
+  if(!inVR())cam.rotation.x=tp?-.18:0;
+  av.visible=tp;av.position.set(px,jy,pz);const sw=jy>0?.35:Math.sin(dist*1.3)*.9;
+  legL.rotation.x=sw;legR.rotation.x=-sw;armL.rotation.x=-sw;armR.rotation.x=sw;body.scale.y=slideT>0?.55:1;
+  const showHint=state!=='play'||tGame<20;labels.forEach(l=>l.visible=showHint);   // controller notices fade after 20 s of play
   hud.textContent=state==='menu'?'':`Score ${score()}  ·  ${dist|0} m  ·  Coins ${coinsN}`;
   if(inVR()&&(hudT-=dt)<=0){hudT=.2;drawVRHud();}
   renderer.render(scene,cam);
