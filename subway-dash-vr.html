@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Subway Dash VR</title>
+<style>
+html,body{margin:0;height:100%;overflow:hidden;background:#10131c;font-family:system-ui,sans-serif;color:#fff}
+#ui{position:fixed;inset:0;z-index:10;display:flex;flex-direction:column;align-items:center;justify-content:center;background:rgba(10,12,20,.82);text-align:center;padding:20px}
+#ui h1{font-size:clamp(30px,6vw,54px);margin:0 0 6px}#msg{font-size:20px;margin:6px 0 14px}
+#btn{font:700 22px system-ui;padding:14px 34px;border:0;border-radius:10px;background:#ffd23f;color:#111;cursor:pointer}
+#guide{font-size:15px;line-height:1.6;max-width:520px;margin-top:18px;color:#dfe6ff}#cap{font-size:13px;max-width:520px;margin-top:10px;color:#9fb0d8}
+#hud{position:fixed;top:12px;left:16px;z-index:5;font:700 22px system-ui;text-shadow:0 2px 4px #000}
+#vrbtn{position:fixed!important;left:50%!important;bottom:24px!important;transform:translateX(-50%)!important;width:auto!important;padding:14px 26px!important;background:#ff3d81!important;color:#fff!important;border:0!important;border-radius:999px!important;font:700 18px system-ui!important;z-index:100!important;opacity:1!important}
+#vrbtn::before{content:"\1F97D\00a0"}
+</style>
+<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"}}</script>
+</head><body>
+<div id="hud"></div>
+<div id="ui"><h1>Subway Dash VR</h1><div id="msg">Dodge trains, jump barriers, slide under bars.</div><button id="btn">Start Game</button>
+<div id="guide"><b>Keyboard:</b> ←/A ,→/D lanes · Space jump · ↓/S slide · P or Esc pause · R restart · G toggle gestures<br>
+<b>VR controllers:</b> stick left/right = lane, stick up or A = jump, stick down or B = slide, trigger = start/resume, Y = pause, X = gestures on/off<br>
+<b>VR gestures:</b> lean = lane · raise a hand = jump · crouch = slide (turn off for seated play)</div><div id="cap"></div></div>
+<script type="module">
+import * as THREE from 'three';
+import { VRButton } from 'three/addons/webxr/VRButton.js';
+
+/* ---- Tunables: gesture thresholds in metres, smoothing 0..1, cooldown in ms ---- */
+const CFG = { lean:.12, crouch:.2, jump:.25, smooth:.25, cool:450 };
+const LANES=[-2,0,2], SEG=40, NS=6, EYE=1.6;
+
+const renderer=new THREE.WebGLRenderer({antialias:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio,2)); renderer.setSize(innerWidth,innerHeight);
+renderer.xr.enabled=true; renderer.xr.setReferenceSpaceType('local-floor');
+document.body.appendChild(renderer.domElement);
+const scene=new THREE.Scene(); scene.background=new THREE.Color(0x10131c); scene.fog=new THREE.Fog(0x10131c,20,95);
+const rig=new THREE.Group(), cam=new THREE.PerspectiveCamera(70,innerWidth/innerHeight,.1,200);
+rig.add(cam); scene.add(rig);   // we move the RIG; the headset owns the camera
+scene.add(new THREE.HemisphereLight(0xb8c4ff,0x2a2a3a,1.1));
+const sun=new THREE.DirectionalLight(0xffffff,.5); sun.position.set(2,8,4); scene.add(sun);
+
+const mat=c=>new THREE.MeshLambertMaterial({color:c});
+const bx=(p,w,h,d,m,x,y,z)=>{const o=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),m);o.position.set(x,y,z);p.add(o);return o;};
+
+/* ---- Environment: 6 station segments, recycled forward forever ---- */
+const segs=[], mFloor=mat(0x23262e), mRail=mat(0x9aa0aa), mTie=mat(0x4a3526), mPlat=mat(0x4a4f5c),
+  mWall=mat(0x2e3a4a), mPil=mat(0x6a707e), mLamp=new THREE.MeshBasicMaterial({color:0xfff2c0});
+for(let i=0;i<NS;i++){
+  const g=new THREE.Group();
+  bx(g,9,.2,SEG,mFloor,0,-.1,0);
+  for(const x of LANES){bx(g,.08,.12,SEG,mRail,x-.5,.05,0);bx(g,.08,.12,SEG,mRail,x+.5,.05,0);}
+  for(let k=0;k<10;k++)bx(g,6.6,.06,.3,mTie,0,.02,-SEG/2+2+k*4);
+  for(const s of[-1,1]){
+    bx(g,3,.6,SEG,mPlat,s*5.3,.3,0); bx(g,.4,7,SEG,mWall,s*7.2,3.5,0);
+    for(let k=0;k<4;k++)bx(g,.5,6,.5,mPil,s*4.2,3,-SEG/2+5+k*10);
+  }
+  bx(g,15,.3,SEG,mWall,0,6.2,0);
+  for(let k=0;k<4;k++)bx(g,2,.1,.6,mLamp,0,6,-SEG/2+5+k*10);
+  g.position.z=40-i*SEG; scene.add(g); segs.push(g);
+}
+
+/* ---- Object pools (nothing is created during play) ---- */
+const defs=[{w:1.8,h:2.6,d:7,y:0,c:0x3a6ea5},{w:1.8,h:.8,d:.5,y:0,c:0xd9453d},
+  {w:1.8,h:.6,d:.5,y:1.1,c:0xe0a82e,legs:1},{w:1.2,h:.9,d:1.2,y:0,c:0x9a6b3c}]; // train, low barrier, overhead bar, crate
+const obs=[]; defs.forEach((d,t)=>{for(let i=0;i<10;i++){
+  const m=new THREE.Mesh(new THREE.BoxGeometry(d.w,d.h,d.d),mat(d.c)); m.visible=false; scene.add(m);
+  if(d.legs)for(const s of[-1,1])bx(m,.1,d.y,.1,mat(0x888888),s*(d.w/2-.1),-d.h/2-d.y/2,0);
+  obs.push({m,t,d,on:false,x:0,z:0});}});
+const cg=new THREE.CylinderGeometry(.25,.25,.06,10).rotateX(Math.PI/2), cm=new THREE.MeshLambertMaterial({color:0xffd23f,emissive:0x8a6a00});
+const coins=[]; for(let i=0;i<60;i++){const m=new THREE.Mesh(cg,cm);m.visible=false;scene.add(m);coins.push({m,on:false,x:0,z:0});}
+function putObs(t,lane,z){const o=obs.find(o=>!o.on&&o.t===t);if(!o)return;o.on=true;o.x=LANES[lane];o.z=z;o.m.position.set(o.x,o.d.y+o.d.h/2,z);o.m.visible=true;}
+function putCoin(lane,z){const c=coins.find(c=>!c.on);if(!c)return;c.on=true;c.x=LANES[lane];c.z=z;c.m.position.set(c.x,.9,z);c.m.visible=true;}
+function spawnRow(z,dif){            // always leaves one lane free
+  const n=Math.random()<.25+dif*.5?2:1, ln=[0,1,2].sort(()=>Math.random()-.5);
+  for(let i=0;i<n;i++)putObs(Math.random()*4|0,ln[i],z);
+  for(let k=0;k<5;k++)putCoin(ln[n],z-k*1.5);
+}
+
+/* ---- Game state ---- */
+let state='menu',lane=1,px=0,pz=0,jy=0,vy=0,slideT=0,coinsN=0,dist=0,tGame=0,nextZ=-35,gestures=true,calibT=0,cool=0;
+const score=()=>(dist|0)+coinsN*10;
+const ui=document.getElementById('ui'),btn=document.getElementById('btn'),msg=document.getElementById('msg'),hud=document.getElementById('hud'),cap=document.getElementById('cap');
+const inVR=()=>renderer.xr.isPresenting;
+function showUI(on,btnText,text){ui.style.display=on?'flex':'none';if(btnText)btn.textContent=btnText;if(text)msg.textContent=text;}
+function startGame(){
+  [...obs,...coins].forEach(o=>{o.on=false;o.m.visible=false;});
+  lane=1;px=0;pz=0;jy=vy=slideT=0;coinsN=0;dist=0;tGame=0;nextZ=-35;
+  segs.forEach((g,i)=>g.position.z=40-i*SEG);
+  if(inVR()&&gestures&&hasCtl){state='calib';calibT=1.5;bn=0;base.x=base.y=base.h=0;}else state='play';
+  showUI(false);
+}
+function gameOver(){state='over';showUI(true,'Restart',`Game over. Score ${score()} (${dist|0} m, ${coinsN} coins)`);}
+function pause(){if(state==='play'){state='pause';showUI(true,'Resume','Paused');}else if(state==='pause'){state='play';showUI(false);}}
+btn.onclick=()=>state==='pause'?pause():startGame();
+
+/* ---- Actions (jump/slide change gameplay state, never the VR camera height) ---- */
+const moveLane=d=>{if(state==='play')lane=Math.max(0,Math.min(2,lane+d));};
+const jump=()=>{if(state==='play'&&jy===0){vy=7.5;slideT=0;}};
+const slide=()=>{if(state==='play'){slideT=.8;if(jy>0)vy=-12;}};
+addEventListener('keydown',e=>{
+  const k=e.code;
+  if(k==='ArrowLeft'||k==='KeyA')moveLane(-1); else if(k==='ArrowRight'||k==='KeyD')moveLane(1);
+  else if(k==='Space'){e.preventDefault();if(state==='menu'||state==='over')startGame();else jump();}
+  else if(k==='ArrowDown'||k==='KeyS')slide(); else if(k==='KeyR')startGame();
+  else if(k==='KeyP')pause(); else if(k==='KeyG')gestures=!gestures;
+  else if(k==='Escape'){if(inVR())renderer.xr.getSession().end();else pause();}
+});
+
+/* ---- VR: controllers + body gestures ---- */
+const c0=renderer.xr.getController(0),c1=renderer.xr.getController(1);
+for(const c of[c0,c1]){rig.add(c);c.addEventListener('selectstart',()=>{if(state==='menu'||state==='over')startGame();else if(state==='pause')pause();});}
+let hasCtl=false;const prev={},base={x:0,y:0,h:0},sm={x:0,y:0,h:0};let bn=0,zone=0;
+function pollVR(){
+  const s=renderer.xr.getSession();if(!s)return;let n=0;
+  for(const src of s.inputSources){
+    const gp=src.gamepad;if(!gp)continue;n++;
+    const p=prev[src.handedness]||(prev[src.handedness]={}),edge=(k,v)=>{const r=v&&!p[k];p[k]=v;return r;};
+    const ax=gp.axes[2]||0,ay=gp.axes[3]||0;
+    if(edge('l',ax<-.7))moveLane(-1); if(edge('r',ax>.7))moveLane(1);
+    if(edge('u',ay<-.7))jump(); if(edge('d',ay>.7))slide();
+    const b4=!!gp.buttons[4]?.pressed,b5=!!gp.buttons[5]?.pressed;
+    if(src.handedness==='right'){
+      if(edge('a',b4)){if(state==='menu'||state==='over')startGame();else jump();}
+      if(edge('b',b5))slide();
+    }else{ if(edge('x',b4))gestures=!gestures; if(edge('y',b5))pause(); }
+  }
+  hasCtl=n>0;
+}
+function gestureStep(now){
+  const hy=Math.max(c0.position.y,c1.position.y),k=CFG.smooth;      // smoothing = simple low-pass filter
+  sm.x+=(cam.position.x-sm.x)*k; sm.y+=(cam.position.y-sm.y)*k; sm.h+=(hy-sm.h)*k;
+  if(state==='calib'){bn++;base.x+=(sm.x-base.x)/bn;base.y+=(sm.y-base.y)/bn;base.h+=(sm.h-base.h)/bn;return;}
+  if(state!=='play'||!gestures||!hasCtl)return;
+  const lean=sm.x-base.x;                                           // lean = head offset sideways from calibrated centre
+  if(Math.abs(lean)>CFG.lean){const z=Math.sign(lean);if(z!==zone){zone=z;lane=1+z;}}
+  else if(Math.abs(lean)<CFG.lean*.6&&zone){zone=0;lane=1;}
+  if(now>cool){
+    if(sm.h-base.h>CFG.jump){jump();cool=now+CFG.cool;}             // hand raised above its calibrated height
+    else if(base.y-sm.y>CFG.crouch){slide();cool=now+CFG.cool;}     // head lowered = crouch
+  }
+}
+
+/* ---- In-VR HUD (canvas texture on a small panel in front of the head) ---- */
+const hc=document.createElement('canvas');hc.width=512;hc.height=256;const hx=hc.getContext('2d'),ht=new THREE.CanvasTexture(hc);
+const hp=new THREE.Mesh(new THREE.PlaneGeometry(.8,.4),new THREE.MeshBasicMaterial({map:ht,transparent:true,depthTest:false}));
+hp.position.set(0,-.4,-1.5);hp.renderOrder=9;hp.visible=false;cam.add(hp);
+let hudT=0;
+function drawVRHud(){
+  const L={play:[`Score ${score()}`,`${dist|0} m   Coins ${coinsN}`],calib:['Hold still...','calibrating'],
+    menu:['Subway Dash VR','Trigger or A to start'],over:['Game over',`Score ${score()}`,'Trigger or A to restart'],pause:['Paused','Trigger to resume']}[state];
+  hx.clearRect(0,0,512,256);hx.fillStyle='rgba(0,0,0,.65)';hx.fillRect(0,0,512,256);hx.fillStyle='#fff';hx.textAlign='center';hx.font='bold 38px sans-serif';
+  L.forEach((t,i)=>hx.fillText(t,256,70+i*52));hx.font='24px sans-serif';hx.fillText('Gestures: '+(gestures&&hasCtl?'ON':'OFF')+' (X toggles)',256,238);ht.needsUpdate=true;
+}
+
+/* ---- Capability detection + VR entry ---- */
+cap.textContent='Hand tracking is not used; gestures use headset + controller tracking.';
+if(navigator.xr){navigator.xr.isSessionSupported('immersive-vr').then(ok=>{
+  if(ok){const b=VRButton.createButton(renderer);b.id='vrbtn';document.body.appendChild(b);cap.textContent='WebXR VR supported. '+cap.textContent;}
+  else cap.textContent='VR not supported here, desktop keyboard mode works. '+cap.textContent;
+}).catch(()=>{});}else cap.textContent='WebXR unavailable (needs HTTPS and a VR browser), keyboard mode works. '+cap.textContent;
+renderer.xr.addEventListener('sessionstart',()=>{hp.visible=true;});
+renderer.xr.addEventListener('sessionend',()=>{hp.visible=false;cam.fov=70;cam.aspect=innerWidth/innerHeight;cam.updateProjectionMatrix();});
+
+/* ---- Per-frame game update ---- */
+function update(dt){
+  const dif=Math.min(1,tGame/120),speed=10+18*dif; tGame+=dt;       // difficulty ramps over ~2 minutes
+  pz-=speed*dt; dist=-pz;
+  px+=(LANES[lane]-px)*Math.min(1,dt*12);
+  if(jy>0||vy>0){vy-=20*dt;jy+=vy*dt;if(jy<=0){jy=0;vy=0;}}
+  if(slideT>0)slideT-=dt;
+  while(nextZ>pz-90){spawnRow(nextZ,dif);nextZ-=Math.max(12,24-12*dif);}
+  const top=jy+(slideT>0?.8:1.7);
+  for(const o of obs){ if(!o.on)continue;
+    if(o.z>pz+8){o.on=false;o.m.visible=false;continue;}             // recycle behind the player
+    if(Math.abs(o.x-px)<o.d.w/2+.3&&Math.abs(o.z-pz)<o.d.d/2+.2&&jy<o.d.y+o.d.h&&top>o.d.y){gameOver();return;}
+  }
+  for(const c of coins){ if(!c.on)continue;
+    if(c.z>pz+8){c.on=false;c.m.visible=false;continue;}
+    if(Math.abs(c.x-px)<.7&&Math.abs(c.z-pz)<.6&&jy<1.2&&top>.6){c.on=false;c.m.visible=false;coinsN++;}
+    c.m.rotation.y+=dt*4;
+  }
+  for(const g of segs)if(g.position.z-SEG/2>pz+SEG/2)g.position.z-=NS*SEG; // infinite track
+}
+const clock=new THREE.Clock();
+renderer.setAnimationLoop(()=>{
+  const dt=Math.min(clock.getDelta(),.05),now=performance.now();
+  if(inVR()){pollVR();gestureStep(now);}
+  if(state==='calib'){calibT-=dt;if(calibT<=0)state='play';}
+  if(state==='play')update(dt);
+  // Desktop gets a little jump/slide camera motion; in VR the headset height is never touched.
+  rig.position.set(px,inVR()?0:EYE+jy*.4-(slideT>0?.5:0),pz);
+  hud.textContent=state==='menu'?'':`Score ${score()}  ·  ${dist|0} m  ·  Coins ${coinsN}`;
+  if(inVR()&&(hudT-=dt)<=0){hudT=.2;drawVRHud();}
+  renderer.render(scene,cam);
+});
+addEventListener('resize',()=>{cam.aspect=innerWidth/innerHeight;cam.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight);});
+</script></body></html>
